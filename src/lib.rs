@@ -16,7 +16,11 @@ extern crate serde_derive;
 extern crate unwrap;
 extern crate redland_sys;
 
+mod errors;
 mod kv_storage;
+
+use crate::errors::RdfError;
+use crate::errors::RdfError::*;
 use foreign_types::{ForeignType, ForeignTypeRef};
 pub use kv_storage::{EntryAction, KvStorage};
 use libc::{c_char, fdopen};
@@ -84,41 +88,44 @@ foreign_type! {
 
 lazy_static! {
     pub(crate) static ref WORLD: Mutex<World> = {
-        let w = World::new();
+        let w = unwrap!(World::new());
         Mutex::new(w)
     };
 }
 
 impl World {
-    pub fn new() -> Self {
+    pub fn new() -> Result<Self, RdfError> {
         unsafe {
             let world_ptr = librdf_new_world();
+            if world_ptr.is_null() {
+                return Err(RdfError::CreateWorld);
+            }
             librdf_world_open(world_ptr);
-            World::from_ptr(world_ptr)
+            Ok(World::from_ptr(world_ptr))
         }
     }
 }
 
 impl Default for World {
     fn default() -> Self {
-        Self::new()
+        unwrap!(Self::new())
     }
 }
 
 impl Model {
-    pub fn new(storage: &KvStorage) -> Result<Self, i32> {
+    pub fn new(storage: &KvStorage) -> Result<Self, RdfError> {
         unsafe { Self::from_raw_storage(storage.as_ptr()) }
     }
 
-    pub unsafe fn from_raw_storage(storage: *mut librdf_storage) -> Result<Self, i32> {
+    pub unsafe fn from_raw_storage(storage: *mut librdf_storage) -> Result<Self, RdfError> {
         let res = librdf_new_model(unwrap!(WORLD.lock()).as_ptr(), storage, ptr::null());
         if res.is_null() {
-            return Err(-1);
+            return Err(RdfError::CreateModel);
         }
         Ok(Model::from_ptr(res))
     }
 
-    pub fn add(&self, subject: &Node, predicate: &Node, object: &Node) -> Result<(), i32> {
+    pub fn add(&self, subject: &Node, predicate: &Node, object: &Node) -> Result<(), RdfError> {
         let res = unsafe {
             librdf_model_add(
                 self.as_ptr(),
@@ -128,15 +135,15 @@ impl Model {
             )
         };
         if res != 0 {
-            return Err(res);
+            return Err(RdfError::AddToModel);
         }
         Ok(())
     }
 
-    pub fn add_statement(&self, statement: &Statement) -> Result<(), i32> {
+    pub fn add_statement(&self, statement: &Statement) -> Result<(), RdfError> {
         let res = unsafe { librdf_model_add_statement(self.as_ptr(), statement.as_ptr()) };
         if res != 0 {
-            return Err(res);
+            return Err(AddStmtToModel);
         }
         Ok(())
     }
@@ -148,9 +155,9 @@ impl Model {
         literal: S,
         xml_language: Option<S>,
         is_xml: bool,
-    ) -> Result<(), i32> {
-        let literal_cstr = CString::new(literal).map_err(|_| -1)?;
-        let xml_lang_cstr = xml_language.map(|s| CString::new(s).map_err(|_| -1));
+    ) -> Result<(), RdfError> {
+        let literal_cstr = CString::new(literal).map_err(|_| ConvertToCString)?;
+        let xml_lang_cstr = xml_language.map(|s| CString::new(s).map_err(|_| ConvertToCString));
         let res = unsafe {
             librdf_model_add_string_literal_statement(
                 self.as_ptr(),
@@ -166,7 +173,7 @@ impl Model {
             )
         };
         if res != 0 {
-            return Err(res);
+            return Err(AddStringLiteralToStatement);
         }
         Ok(())
     }
@@ -227,9 +234,9 @@ impl Query {
         query_language: S,
         query_string: S,
         base_uri: Option<&Uri>,
-    ) -> Result<Self, i32> {
-        let c_query_string = CString::new(query_string).map_err(|_| -1)?;
-        let c_query_lang = CString::new(query_language).map_err(|_| -1)?;
+    ) -> Result<Self, RdfError> {
+        let c_query_string = CString::new(query_string).map_err(|_| ConvertToCString)?;
+        let c_query_lang = CString::new(query_language).map_err(|_| ConvertToCString)?;
 
         let res = unsafe {
             librdf_new_query(
@@ -241,16 +248,16 @@ impl Query {
             )
         };
         if res.is_null() {
-            return Err(-1);
+            return Err(CreateQuery);
         }
         Ok(unsafe { Query::from_ptr(res) })
     }
 
-    pub fn execute(&self, model: &Model) -> Result<QueryResult, i32> {
+    pub fn execute(&self, model: &Model) -> Result<QueryResult, RdfError> {
         unsafe {
             let query_res = librdf_query_execute(self.as_ptr() as *mut _, model.as_ptr() as *mut _);
             if query_res == ptr::null_mut() {
-                return Err(-1);
+                return Err(ExecuteQuery);
             }
             Ok(QueryResult::from_ptr(query_res))
         }
@@ -264,14 +271,14 @@ impl QueryResult {
         mime_type: Option<&str>,
         format_uri: Option<&Uri>,
         base_uri: Option<&Uri>,
-    ) -> Result<String, i32> {
+    ) -> Result<String, RdfError> {
         unsafe {
-            let converted_name = CString::new(name).map_err(|_| -1)?;
+            let converted_name = CString::new(name).map_err(|_| ConvertToCString)?;
             let result = librdf_query_results_to_string2(
                 self.as_ptr() as *mut _,
                 converted_name.as_ptr() as *mut _,
                 if let Some(mime) = mime_type {
-                    let converted_mime = CString::new(mime).map_err(|_| -1)?;
+                    let converted_mime = CString::new(mime).map_err(|_| ConvertToCString)?;
                     converted_mime.as_ptr() as *mut _
                 } else {
                     ptr::null()
@@ -279,25 +286,25 @@ impl QueryResult {
                 format_uri.map_or_else(ptr::null_mut, |uri| uri.as_ptr()),
                 base_uri.map_or_else(ptr::null_mut, |uri| uri.as_ptr()),
             );
-            if result == ptr::null_mut() {
-                return Err(-1);
+            if result.is_null() {
+                return Err(CreateStringFromQueryResult);
             } else {
                 let res = if let Ok(string) = CStr::from_ptr(result as *const c_char).to_str() {
                     Some(string.to_owned())
                 } else {
                     None
                 };
-                return res.ok_or(-1);
+                return res.ok_or(CreateStringFromQueryResult);
             }
         }
     }
 }
 
 impl Statement {
-    pub fn new() -> Result<Self, i32> {
+    pub fn new() -> Result<Self, RdfError> {
         let res = unsafe { librdf_new_statement(unwrap!(WORLD.lock()).as_ptr()) };
         if res.is_null() {
-            return Err(-1);
+            return Err(CreateStatement);
         }
         Ok(unsafe { Statement::from_ptr(res) })
     }
@@ -355,8 +362,8 @@ impl fmt::Debug for Statement {
 }
 
 impl Uri {
-    pub fn new<S: Into<Vec<u8>>>(uri: S) -> Result<Self, i32> {
-        let cstr_uri = CString::new(uri).map_err(|_| -1)?;
+    pub fn new<S: Into<Vec<u8>>>(uri: S) -> Result<Self, RdfError> {
+        let cstr_uri = CString::new(uri).map_err(|_| ConvertToCString)?;
         let res = unsafe {
             librdf_new_uri(
                 unwrap!(WORLD.lock()).as_ptr(),
@@ -364,7 +371,7 @@ impl Uri {
             )
         };
         if res.is_null() {
-            return Err(-1);
+            return Err(CreateURI);
         }
         Ok(unsafe { Uri::from_ptr(res) })
     }
@@ -390,10 +397,10 @@ impl PartialEq for NodeRef {
 }
 
 impl Node {
-    pub fn new() -> Result<Self, i32> {
+    pub fn new() -> Result<Self, RdfError> {
         let res = unsafe { librdf_new_node(unwrap!(WORLD.lock()).as_ptr()) };
         if res.is_null() {
-            return Err(-1);
+            return Err(CreateNode);
         }
         Ok(unsafe { Node::from_ptr(res) })
     }
@@ -403,9 +410,9 @@ impl Node {
         string: S,
         xml_language: Option<S>,
         is_xml: bool,
-    ) -> Result<Self, i32> {
-        let cstr = CString::new(string).map_err(|_| -1)?;
-        let xml_lang_cstr = xml_language.map(|s| CString::new(s).map_err(|_| -1));
+    ) -> Result<Self, RdfError> {
+        let cstr = CString::new(string).map_err(|_| ConvertToCString)?;
+        let xml_lang_cstr = xml_language.map(|s| CString::new(s).map_err(|_| ConvertToCString));
         let res = unsafe {
             librdf_new_node_from_literal(
                 unwrap!(WORLD.lock()).as_ptr(),
@@ -419,7 +426,7 @@ impl Node {
             )
         };
         if res.is_null() {
-            return Err(-1);
+            return Err(CreateNodeFromLiteral);
         }
         Ok(unsafe { Node::from_ptr(res) })
     }
@@ -428,8 +435,8 @@ impl Node {
     pub fn new_from_uri_local_name<S: Into<Vec<u8>>>(
         uri: &Uri,
         local_name: S,
-    ) -> Result<Self, i32> {
-        let cstr_local_name = CString::new(local_name).map_err(|_| -1)?;
+    ) -> Result<Self, RdfError> {
+        let cstr_local_name = CString::new(local_name).map_err(|_| ConvertToCString)?;
         let res = unsafe {
             librdf_new_node_from_uri_local_name(
                 unwrap!(WORLD.lock()).as_ptr(),
@@ -438,48 +445,33 @@ impl Node {
             )
         };
         if res.is_null() {
-            return Err(-1);
+            return Err(CreateNodeFromLocalName);
         }
         Ok(unsafe { Node::from_ptr(res) })
     }
 
     /// Creates a new Node from a URI
-    pub fn new_from_uri(uri: &Uri) -> Result<Self, i32> {
+    pub fn new_from_uri(uri: &Uri) -> Result<Self, RdfError> {
         let res = unsafe { librdf_new_node_from_uri(unwrap!(WORLD.lock()).as_ptr(), uri.as_ptr()) };
         if res.is_null() {
-            return Err(-1);
+            return Err(CreateNodeFromURI);
         }
         Ok(unsafe { Node::from_ptr(res) })
     }
 }
 
 impl Parser {
-    pub fn new<S: Into<Vec<u8>>>(
-        factory_name: Option<S>,
-        mime_type: Option<S>,
-        type_uri: Option<&Uri>,
-    ) -> Result<Self, i32> {
+    pub fn new<S: Into<Vec<u8>>>(mime_type: S) -> Result<Self, RdfError> {
+        let mime = CString::new(mime_type).map_err(|_| ConvertToCString)?;
         unsafe {
-            let c_factoryname = factory_name.map(|f| CString::new(f).map_err(|_| -1));
-            let c_mime = mime_type.map(|m| CString::new(m).map_err(|_| -1));
             let parser = librdf_new_parser(
                 unwrap!(WORLD.lock()).as_ptr(),
-                if let Some(name) = c_factoryname {
-                    name?.as_ptr() as *mut _
-                } else {
-                    ptr::null_mut()
-                },
-                if let Some(mime) = c_mime {
-                    mime?.as_ptr() as *mut _
-                } else {
-                    ptr::null_mut()
-                },
-                type_uri
-                    .as_ref()
-                    .map_or_else(ptr::null_mut, |uri| uri.as_ptr()),
+                ptr::null_mut(),
+                mime.as_ptr() as *mut _,
+                ptr::null_mut(),
             );
             if parser.is_null() {
-                return Err(-1);
+                return Err(CreateParser);
             }
             Ok(Parser::from_ptr(parser))
         }
@@ -490,8 +482,8 @@ impl Parser {
         syntax: &str,
         base_uri: Option<&Uri>,
         model: &Model,
-    ) -> Result<(), i32> {
-        let converted_syntax = CString::new(syntax).map_err(|_| -1)?;
+    ) -> Result<(), RdfError> {
+        let converted_syntax = CString::new(syntax).map_err(|_| ConvertToCString)?;
         unsafe {
             let res = librdf_parser_parse_string_into_model(
                 parser.as_ptr(),
@@ -499,8 +491,8 @@ impl Parser {
                 base_uri.map_or_else(ptr::null_mut, |uri| uri.as_ptr()),
                 model.as_ptr(),
             );
-            if res > 0 {
-                return Err(-1);
+            if res != 0 {
+                return Err(ParseStringIntoModel);
             }
             Ok(())
         }
@@ -511,13 +503,14 @@ impl Parser {
         file_handle: &std::fs::File,
         base_uri: Option<&Uri>,
         model: &Model,
-    ) -> Result<(), i32> {
+    ) -> Result<(), RdfError> {
         unsafe {
             #[cfg(unix)]
             let c_file = fdopen(
                 file_handle.as_raw_fd(),
                 CStr::from_bytes_with_nul_unchecked(b"r\0").as_ptr() as *const i8,
             );
+
             #[cfg(windows)]
             let c_file = fdopen(
                 file_handle.as_raw_handle(),
@@ -533,7 +526,7 @@ impl Parser {
             );
 
             if res != 0 {
-                return Err(-1);
+                return Err(ParseFileIntoModel);
             }
 
             Ok(())
@@ -546,9 +539,9 @@ impl Serializer {
         name: S,
         mime_type: Option<S>,
         type_uri: Option<&Uri>,
-    ) -> Result<Self, i32> {
-        let c_name = CString::new(name).map_err(|_| -1)?;
-        let c_mime = mime_type.map(|s| CString::new(s).map_err(|_| -1));
+    ) -> Result<Self, RdfError> {
+        let c_name = CString::new(name).map_err(|_| ConvertToCString)?;
+        let c_mime = mime_type.map(|s| CString::new(s).map_err(|_| ConvertToCString));
         let ser = unsafe {
             librdf_new_serializer(
                 unwrap!(WORLD.lock()).as_ptr(),
@@ -562,23 +555,23 @@ impl Serializer {
             )
         };
         if ser.is_null() {
-            return Err(-1);
+            return Err(CreateSerializer);
         }
         Ok(unsafe { Serializer::from_ptr(ser) })
     }
 
-    pub fn set_namespace<S: Into<Vec<u8>>>(&self, uri: &Uri, prefix: S) -> Result<(), i32> {
-        let c_prefix = CString::new(prefix).map_err(|_| -1)?;
+    pub fn set_namespace<S: Into<Vec<u8>>>(&self, uri: &Uri, prefix: S) -> Result<(), RdfError> {
+        let c_prefix = CString::new(prefix).map_err(|_| ConvertToCString)?;
         let res = unsafe {
             librdf_serializer_set_namespace(self.as_ptr(), uri.as_ptr(), c_prefix.as_ptr())
         };
         if res != 0 {
-            return Err(res);
+            return Err(SetNamespaceToSerializer);
         }
         Ok(())
     }
 
-    pub fn serialize_model_to_string(&self, model: &Model) -> Result<String, i32> {
+    pub fn serialize_model_to_string(&self, model: &Model) -> Result<String, RdfError> {
         unsafe {
             let result = librdf_serializer_serialize_model_to_string(
                 self.as_ptr(),
@@ -586,7 +579,7 @@ impl Serializer {
                 model.as_ptr(),
             );
             if result.is_null() {
-                return Err(-1);
+                return Err(ConvertToStringInSerializer);
             }
 
             let res = if let Ok(string) = CStr::from_ptr(result as *const c_char).to_str() {
@@ -596,7 +589,7 @@ impl Serializer {
             };
             librdf_free_memory(result as *mut _);
 
-            res.ok_or(-1)
+            res.ok_or(ConvertToStringInSerializer)
         }
     }
 }
@@ -623,7 +616,7 @@ mod tests {
         let storage = unwrap!(KvStorage::new());
         let model = unwrap!(Model::new(&storage));
 
-        let uri1 = unwrap!(Uri::new("https://localhost/#dolly"));
+        let uri1 = unwrap!(Uri::new("https://localhost/#says"));
         let uri2 = unwrap!(Uri::new("https://localhost/#hears"));
 
         let mut triple1 = unwrap!(Statement::new());

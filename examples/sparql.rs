@@ -16,9 +16,14 @@ fn main() {
     let mime_type = "text/turtle";
     let base_uri = unwrap!(Uri::new("http://www.w3.org/2006/vcard/ns#"));
     //Initialize Parser
-    let parser = unwrap!(Parser::new(None, Some(mime_type), None));
+    let parser = unwrap!(Parser::new(mime_type));
     //Parsing from file
-    let _ = Parser::parse_from_file(parser, &turtle_file, Some(&base_uri), &model);
+    let _ = unwrap!(Parser::parse_from_file(
+        parser,
+        &turtle_file,
+        Some(&base_uri.clone()),
+        &model
+    ));
 
     let query_string = unwrap!(fs::read_to_string("sample_code/sparql_query.txt"));
     let query = unwrap!(Query::new("sparql", &query_string, Some(&base_uri.clone())));

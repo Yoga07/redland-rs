@@ -11,11 +11,11 @@ use std::io::prelude::*;
 use bincode::{deserialize, serialize};
 
 fn create_mock_model(storage: &KvStorage) -> Result<Model, i32> {
-    let ms_schema = Uri::new("http://maidsafe.net/")?;
-    let subject = Node::new_from_uri_local_name(&ms_schema, "MaidSafe")?;
-    let predicate = Node::new_from_uri_local_name(&ms_schema, "location")?;
-    let model = Model::new(storage)?;
-    model.add_string_literal_statement(&subject, &predicate, "Ayr", None, false)?;
+    let ms_schema = unwrap!(Uri::new("http://maidsafe.net/"));
+    let subject = unwrap!(Node::new_from_uri_local_name(&ms_schema, "MaidSafe"));
+    let predicate = unwrap!(Node::new_from_uri_local_name(&ms_schema, "location"));
+    let model = unwrap!(Model::new(storage));
+    unwrap!(model.add_string_literal_statement(&subject, &predicate, "Ayr", None, false));
     Ok(model)
 }
 

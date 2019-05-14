@@ -13,7 +13,7 @@ use libc::c_char;
 use std::ptr;
 
 fn main() {
-    let world = World::new();
+    let world = unwrap!(World::new());
 
     let storage = unsafe {
         librdf_new_storage(
